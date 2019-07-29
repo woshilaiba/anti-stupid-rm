@@ -1,0 +1,185 @@
+#!/bin/bash
+#真是rm命令路径
+realrm="/bin/rm"
+#通过mount命令取得挂载点,mount命令一般来讲都应该存在,也可以通过/etc/mtab或/proc/mounts来取得
+#将其缓存在文件中
+MOUNT_IS_EXCUTED="false"
+MOUNT_POINT=()
+readonly MYMOUNTS="/tmp/mymounts" #此值必须保证路径安全否则可能造成危险
+do_mount_scan(){
+	tmp_mount_point=()
+	#执行mount命令，找出挂载点
+	#mount是取自于util-linux，其他的mount输出格式可能不同，需要调整
+	#输出格式为  "xxx on yyy type zzz (attributes)" 一行6个串
+	#xxx为源device，yyy为目标路径挂载点，zzz为设备文件系统类型，
+	#只有device为block的列入缓存文件，其他类型的不列入
+	
+	#mount挂载点列表数组
+	mount_array=( $(mount) )
+	let i=0
+	#echo "array len=${#mount_array[@]}"
+	arr_len=${#mount_array[@]}
+	while [[ i -lt $arr_len ]]
+	do
+#		echo "array is ${mount_array[@]:$((i+0)):$((i+5))} ${mount_array[1]} ${mount_array[2]} ${mount_array[3]}"
+		if [ -b ${mount_array[$((i+0))]} -o ${mount_array[$((i+4))]} == "drvfs" -o ${mount_array[$((i+4))]} == "lxfs" -o ${mount_array[$((i+4))]} == "9p" ]
+		then
+			#MOUNT_POINT=(${MOUNT_POINT[@]} ${mount_array[@]:$((i+0)):$((i+5))} )
+			#MOUNT_POINT=(${MOUNT_POINT[@]} ${mount_array[$((i+2))]} )
+			#echo ${MOUNT_POINT[$((i+2))]} >> $MYMOUNTS #这么写可以按行写入文件，可以给sort提供方便
+			tmp_mount_point=(${tmp_mount_point[@]}"${mount_array[$((i+2))]}\n") #此处\n是为了一会使用echo时分行
+		fi
+		let i+=6
+	done
+	#重排序挂载点，这样可以保证通过bind方式挂载的内容依然可以很容易的mv到合适的地方，防止跨分区移动
+	MOUNT_POINT=($(echo -e ${tmp_mount_point[@]} |sort -b -r))
+	#写入文件缓存
+	echo ${MOUNT_POINT[@]} > $MYMOUNTS
+	MOUNT_IS_EXCUTED="true"
+}
+
+
+#取得文件所在的绝对路径
+getabsolutepath(){
+	curdir=$PWD
+	origfile=$1
+	if [ -d "$origfile" ]
+	then
+		cd "$origfile"
+	else
+		#此处不使用这个方式，如果最前面根本就没有根路径或相对路径，则会取不到正确路径
+		#cd ${origfile%/*}		
+		cd $(dirname $origfile)
+	fi
+	if [ $? -ne 0 ]
+	then
+		#说明进入不成功很可能这个路径不存在，或没有权限
+		echo "" #返回一个空串
+		return 1
+	else
+		echo "$PWD"
+		cd $curdir
+	fi
+}
+#查找挂载点
+found="false"
+mount_root=""
+find_mountpoint(){
+	found="false"
+	mount_root=""
+	#$1是即是待确认的文件
+	abs_arg=$(getabsolutepath "$1")
+	if [ "$abs_arg" = "" ]
+	then
+		#没有取到绝对路径，退出
+		return 1
+	fi
+	#查找arg所在的挂载点
+	for i in ${MOUNT_POINT[@]};do
+		str_len=${#i}
+		tmpstr=${abs_arg:0:$((str_len))}
+		if [ "$i" = "$tmpstr" ]
+		then
+			#找到了挂载点
+			found="true"
+			mount_root="$i"
+			return 
+		fi
+	done
+	#没找到挂载点
+	#先确定是否已经重新检查过mount的条目了，防止有新路径挂载到系统中了
+	if [ "$MOUNT_IS_EXCUTED" = "false" ]
+	then
+		#执行一次do_mount_scan，然后再查一次
+		do_mount_scan
+		find_mountpoint "$abs_arg"
+	fi
+}
+
+#赋值MOUNT_POINT
+if [ -f $MYMOUNTS ]
+then
+	MOUNT_POINT=($(cat $MYMOUNTS))
+else
+	do_mount_scan
+fi
+#过滤掉rm命令的选项，只取参数
+TEMP_OPT=$(getopt -o 'ifIrRdv' -l 'version,help,verbose,dir,force,recursive,preserve-root,no-preserve-root,one-file-system,interactive::' -- "$@" )
+eval set -- "$TEMP_OPT"  #将参数重新整理，也就是将temp_opt重新放置为参数
+unset TEMP_OPT
+#过滤参数，只留下除选项的部分
+while true; do
+	case "$1" in
+		'--')
+			shift
+			break
+		;;
+		*)
+			shift 
+			continue
+		;;
+	esac
+done
+#准备move或者rm
+for arg; do #此种写法相当与 "for arg in $@; do"
+	#判定每个文件是否存在
+	#如果存在则寻找其所在分区的挂载点根目录,该寻找过程只执行一次，并记录到缓存文件中，如果依然没有则报个简单错误，继续下一个
+	#先确定是否有通配符，如果有则检查其父文件夹是否存在
+	tmparg="$arg"
+	argbase=${tmparg##*/}
+	#argdir=${tmparg%/*}  #可以用这种方式
+	argdir=$(dirname $tmparg)
+	argbase_subs_star=${argbase//'*'/} #替换所有的*字符
+	argbase_subs_question=${argbase//'?'/} #替换所有的？字符
+	if [ ${#argbase_subs_star} -ne ${#argbase} -o  ${#argbase_subs_question} -ne ${#argbase} ]
+	then
+		tmparg=${argdir}
+	fi
+	if [ -e $tmparg ]
+	then
+		find_mountpoint "$tmparg"
+		if [ $found = "true" ]
+		then
+			#找到挂载点
+			#检查是否每个挂载根目录下是否有#recycle文件夹
+			if [ -e "${mount_root}/#recycle" ]
+			then
+				if [  ! -d "${mount_root}/#recycle" ]
+				then
+					#忽略该请求，并作出通知
+					echo "${mount_root}/#recycle is not directory, Ignore file $arg !"
+					continue
+				fi
+			else
+				#先使用当前用户创建这个文件夹
+				mkdir -m777 "${mount_root}/#recycle"
+				if [ $? -ne 0 ]
+				then
+					#创建未成功
+					#使用sudo创建，如果不成功则进入下一次循环
+					sudo mkdir -m777 "${mount_root}/#recycle"
+					if [ $? -ne 0 ]
+					then										
+						#通知用户，并执行rm -i由用户决定是否删除
+						echo "no ${mount_root}/#recycle directory to move $arg to!"
+						$realrm -i -r -- "$arg"
+						continue
+					fi
+				fi
+			fi
+			mv -- $arg "${mount_root}/#recycle/"
+			if [ $? -ne 0 ]
+			then
+				#mv不成功，此处应作出提醒
+				echo "mv $arg to ${mount_root}/#recycle/ failed!"
+			else
+				echo "mv $arg to ${mount_root}/#recycle/"
+			fi
+		else
+			#似乎是特殊文件或者没有权限取得路径的文件，直接使用rm -i，有用户决定是否删除
+			$realrm -i -r -- "$arg"
+		fi
+	else
+		echo "file $arg does not exist! ignore"
+	fi
+done
