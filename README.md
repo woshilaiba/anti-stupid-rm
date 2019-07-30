@@ -19,7 +19,7 @@ then check to ensure directory "/home/#recycle" is present or creates it, then m
 
 
 中文：
-上面的英文好像有点蹩脚，欢迎各位修改。
+上面的英文比较蹩脚，欢迎各位修改。
 安装的主要步骤是：
 1. 将 anti-stupid-rm添加到 PATH中,可以将其复制到/usr/bin这类的路径中，也可以在环境中
    export PATH="anti-stupid-rm——PATH":$PATH
@@ -40,6 +40,6 @@ then check to ensure directory "/home/#recycle" is present or creates it, then m
 删除非block device上的文件或者没办法创建#recycle目录的分区内的文件时直接使用 /bin/rm -i来询问用户。
 
 
-如果想要真正的删除文件需要 使用 realrm  ddddd或者  /bin/rm -rf ddddd  
+如果想要真正的删除某文件需要 使用 "realrm  ddddd"或者  "/bin/rm -rf ddddd"  
 ^_^
 
